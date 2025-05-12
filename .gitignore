@@ -2,6 +2,5 @@ chroma_db
 venv
 text
 .env
-poppler-24.08.0
 md_output
 __pycache__
