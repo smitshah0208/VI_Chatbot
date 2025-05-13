@@ -23,6 +23,7 @@ import re
 import sys
 import uuid
 import traceback # Import traceback for detailed error logging
+import time
 
 # Configure logging to show more detailed information
 logging.basicConfig(level=logging.INFO,
@@ -118,19 +119,45 @@ def safely_remove_path(path, is_dir=False):
     """
     Safely removes a file or directory with robust error handling.
     Includes logging and a fallback to renaming if deletion fails due to permissions or in-use issues.
+    
+    Args:
+        path (str): The path to the file or directory to remove
+        is_dir (bool): True if the path is a directory, False if it's a file
+        
+    Returns:
+        bool: True if removal was successful (or path didn't exist), False otherwise
     """
+    path = os.path.abspath(path)  # Convert to absolute path for consistency
+    
     if not os.path.exists(path):
         logger.debug(f"Đường dẫn không tồn tại, không cần xóa: {path}")
         return True # Path doesn't exist, nothing to remove, consider successful
 
     try:
         if is_dir:
-            # Use shutil.rmtree for directories
+            # First try to clean up files inside the directory
+            try:
+                for root, dirs, files in os.walk(path):
+                    for f in files:
+                        try:
+                            os.unlink(os.path.join(root, f))
+                        except Exception as e:
+                            logger.warning(f"Không thể xóa tệp {f} trong thư mục {path}: {e}")
+                    
+                    for d in dirs:
+                        try:
+                            shutil.rmtree(os.path.join(root, d))
+                        except Exception as e:
+                            logger.warning(f"Không thể xóa thư mục con {d} trong {path}: {e}")
+            except Exception as e:
+                logger.warning(f"Lỗi khi cố gắng xóa nội dung của thư mục {path}: {e}")
+            
+            # Now try to remove the directory itself
             shutil.rmtree(path)
             logger.info(f"Đã xóa thư mục thành công: {path}")
         else:
             # Use os.remove for files
-            os.remove(path)
+            os.remove(path)  # Alternatively use os.unlink(path)
             logger.info(f"Đã xóa tệp thành công: {path}")
         return True
     except (OSError, PermissionError) as e:
@@ -141,15 +168,45 @@ def safely_remove_path(path, is_dir=False):
             # Use a unique suffix derived from session ID and timestamp for clarity
             unique_suffix = f"{st.session_state.get('unique_session_id', str(uuid.uuid4()))[:6]}_{int(os.times().elapsed)}"
             new_path = f"{path}_old_{unique_suffix}"
+            
+            # Try to move the file/directory to a new name
             os.rename(path, new_path)
             logger.warning(f"Không thể xóa, đã đổi tên thành: {new_path}")
-            # Note: The renamed file/directory still exists and might need manual cleanup later.
-            return True # Renaming was successful, effectively moving the problematic path
+            
+            # If we're dealing with an important database directory, try clearing its contents
+            if is_dir and "chroma_db" in path.lower():
+                try:
+                    # Try to delete all contents inside but leave the renamed directory
+                    for item in os.listdir(new_path):
+                        item_path = os.path.join(new_path, item)
+                        if os.path.isfile(item_path):
+                            os.unlink(item_path)
+                        elif os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                    logger.info(f"Đã xóa nội dung của thư mục đã đổi tên: {new_path}")
+                except Exception as inner_e:
+                    logger.warning(f"Không thể xóa nội dung của thư mục đã đổi tên {new_path}: {inner_e}")
+                    
+            return True  # Renaming was successful, effectively moving the problematic path
         except Exception as rename_err:
             logger.error(f"Cả xóa và đổi tên đều thất bại cho {'thư mục' if is_dir else 'tệp'} {path}: {rename_err}", exc_info=True)
+            
+            # Final fallback for Windows: Use the 'del' or 'rmdir' command directly
+            if sys.platform.startswith('win'):
+                try:
+                    import subprocess
+                    if is_dir:
+                        subprocess.call(f'rmdir /S /Q "{path}"', shell=True)
+                    else:
+                        subprocess.call(f'del /F /Q "{path}"', shell=True)
+                    logger.info(f"Đã thử xóa {'thư mục' if is_dir else 'tệp'} {path} bằng lệnh hệ thống Windows")
+                    if not os.path.exists(path):
+                        return True
+                except Exception as cmd_err:
+                    logger.error(f"Lệnh hệ thống cũng thất bại: {cmd_err}")
+            
             st.error(f"Lỗi nghiêm trọng: Không thể xóa hoặc đổi tên {'thư mục' if is_dir else 'tệp'} cũ tại {path}. Vui lòng xóa thủ công để tiếp tục.")
-            return False # Both attempts failed
-
+            return False  # Both attempts failed
 
 def reset_chat():
     """
@@ -160,17 +217,34 @@ def reset_chat():
     logger.info("Đang đặt lại trò chuyện và trạng thái xử lý.")
 
     # --- Cleanup Files and Directories ---
-    # Clean up the markdown output file and directory
-    if os.path.exists(MARKDOWN_OUTPUT_DIR):
-         safely_remove_path(MARKDOWN_OUTPUT_FILE_PATH, is_dir=False) # Try removing the file first
-         safely_remove_path(MARKDOWN_OUTPUT_DIR, is_dir=True) # Then remove the directory
+    
+    # Get the actual paths from session state if available
+    current_db_path = st.session_state.get('current_db_path', CHROMA_DB_DIR)
+    
+    # Clean up the markdown output file and directory with absolute paths
+    md_output_file_path = os.path.abspath(MARKDOWN_OUTPUT_FILE_PATH)
+    md_output_dir = os.path.abspath(MARKDOWN_OUTPUT_DIR)
+    
+    logger.info(f"Attempting to clean up markdown file: {md_output_file_path}")
+    if os.path.exists(md_output_file_path):
+        safely_remove_path(md_output_file_path, is_dir=False)
+    
+    logger.info(f"Attempting to clean up markdown directory: {md_output_dir}")
+    if os.path.exists(md_output_dir):
+        safely_remove_path(md_output_dir, is_dir=True)
 
-    # Clean up all potential DB directories where the vector store might have been created
-    # It's safer to iterate through all candidates for cleanup
+    # Clean up the current DB directory first (the one actually used)
+    logger.info(f"Attempting to clean up current DB directory: {current_db_path}")
+    if current_db_path and current_db_path != "bộ nhớ (trong RAM)" and os.path.exists(current_db_path):
+        safely_remove_path(current_db_path, is_dir=True)
+    
+    # Also clean up all potential DB directories where the vector store might have been created
     logger.info("Đang cố gắng xóa các thư mục cơ sở dữ liệu Chroma tiềm năng.")
     for db_dir in DB_DIRECTORIES:
-        if os.path.exists(db_dir):
-            safely_remove_path(db_dir, is_dir=True)
+        db_dir_abs = os.path.abspath(db_dir)
+        if os.path.exists(db_dir_abs):
+            logger.info(f"Cleaning up potential DB directory: {db_dir_abs}")
+            safely_remove_path(db_dir_abs, is_dir=True)
 
     # --- Reset Session State ---
     st.session_state['history'] = [] # Langchain history
@@ -178,9 +252,24 @@ def reset_chat():
     st.session_state['past'] = ["Xin chào! 👋 Hãy hỏi tôi bất cứ điều gì về tài liệu PDF đã tải lên 📄"]
     st.session_state['generated'] = ["Các phản hồi của bạn sẽ được hiển thị ở đây."]
 
-    # Remove chain and vector store instances
-    st.session_state.pop('chain', None)
-    st.session_state.pop('vector_store', None)
+    # Remove chain and vector store instances - important to release memory
+    if 'chain' in st.session_state:
+        st.session_state.pop('chain', None)
+    
+    if 'vector_store' in st.session_state:
+        # Try to explicitly close/delete the vector store if it has such methods
+        try:
+            if hasattr(st.session_state['vector_store'], 'delete_collection'):
+                st.session_state['vector_store'].delete_collection()
+            elif hasattr(st.session_state['vector_store'], '_collection'):
+                try:
+                    st.session_state['vector_store']._collection.delete()
+                except:
+                    pass
+        except Exception as e:
+            logger.warning(f"Error while trying to delete vector store collection: {e}")
+        
+        st.session_state.pop('vector_store', None)
 
     # Reset processing flags and info
     st.session_state['processed_pdf_name'] = None
@@ -195,7 +284,6 @@ def reset_chat():
     logger.info("Chat và trạng thái xử lý đã được đặt lại.")
     # Streamlit automatically reruns when a button is clicked,
     # so the UI will update to show only the initial messages.
-
 
 def conversation_chat(query, chain, history):
     """
@@ -573,6 +661,7 @@ def main():
     if st.sidebar.button("🔄 Đặt lại Trò chuyện"):
         # Call the reset function and then rerun the app
         reset_chat()
+        time.sleep(4)
         st.rerun() # Force a rerun to clear the UI immediately
 
     # --- Main Content Area Logic ---
@@ -691,3 +780,4 @@ def main():
 # --- Script Entry Point ---
 if __name__ == "__main__":
     main()
+
