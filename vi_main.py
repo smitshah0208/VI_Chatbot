@@ -39,7 +39,7 @@ MARKDOWN_OUTPUT_DIR = "md_output"
 # Define the full path to the markdown output file
 MARKDOWN_OUTPUT_FILE_PATH = os.path.join(MARKDOWN_OUTPUT_DIR, MARKDOWN_OUTPUT_FILENAME)
 # Define the directory for Chroma DB
-CHROMA_DB_DIR = "./chroma_db"
+CHROMA_DB_DIR = "./md_chroma_db"
 
 # Define the fixed Poppler path
 FIXED_POPPLER_PATH = r".\poppler-24.08.0\Library\bin"
