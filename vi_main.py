@@ -228,6 +228,7 @@ def process_markdown_file_lines(markdown_file_path: str):
 def create_vector_store_from_documents(documents: list[Document]):
     """
     Generates a Chroma vector store using Azure OpenAI embeddings from a list of documents.
+    Includes robust handling for directory permissions and fallback options.
     """
     if not documents:
         st.error("Không có tài liệu nào để tạo vector store.")
@@ -237,11 +238,11 @@ def create_vector_store_from_documents(documents: list[Document]):
         logger.info("Đang khởi tạo AzureOpenAIEmbeddings...")
         # Ensure these environment variables are set
         embeddings = AzureOpenAIEmbeddings(
-            deployment=os.getenv("OPENAI_ADA_EMBEDDING_EMBEDDING_DEPLOYMENT_NAME"), # Corrected env var name
+            deployment=os.getenv("OPENAI_ADA_EMBEDDING_EMBEDDING_DEPLOYMENT_NAME"),
             model=os.getenv("OPENAI_ADA_EMBEDDING_MODEL_NAME"),
             azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
             openai_api_type="azure",
-            chunk_size=100 # This chunk_size is for the embedding model's internal batching
+            chunk_size=100
         )
         logger.info("Đã khởi tạo AzureOpenAIEmbeddings thành công.")
     except Exception as e:
@@ -250,23 +251,80 @@ def create_vector_store_from_documents(documents: list[Document]):
         st.error(f"Lỗi cụ thể: {e}")
         return None
 
+    # Try several different directory options until one works
+    potential_directories = [
+        CHROMA_DB_DIR,                                 # Original location
+        os.path.join(tempfile.gettempdir(), "md_chroma_db"),  # Temp directory
+        os.path.expanduser("~/md_chroma_db"),          # Home directory
+        "/tmp/md_chroma_db"                            # Linux/Unix tmp directory
+    ]
+    
+    for db_path in potential_directories:
+        try:
+            # Ensure the directory exists with proper permissions
+            os.makedirs(db_path, exist_ok=True)
+            logger.info(f"Đã tạo thư mục db_path: {db_path}")
+            
+            # Test write permissions by creating and removing a test file
+            test_file = os.path.join(db_path, "test_write.txt")
+            with open(test_file, 'w') as f:
+                f.write("Testing write permissions")
+            os.remove(test_file)
+            logger.info(f"Kiểm tra quyền ghi thành công tại: {db_path}")
+            
+            # Initialize Chroma with the confirmed writable directory
+            logger.info(f"Đang tạo Chroma vector store từ các dòng vào {db_path}...")
+            
+            # Attempt with persist_directory
+            try:
+                vector_store = Chroma.from_documents(
+                    documents=documents,
+                    embedding=embeddings,
+                    collection_name="markdown_image_chunk_collection",
+                    persist_directory=db_path
+                )
+                logger.info(f"Đã tạo thành công Chroma vector store tại: {db_path}")
+                return vector_store
+            except Exception as inner_e:
+                logger.warning(f"Không thể tạo persistent Chroma DB: {inner_e}, thử lại không có persist_directory...")
+                # Try without persist_directory as fallback
+                vector_store = Chroma.from_documents(
+                    documents=documents,
+                    embedding=embeddings,
+                    collection_name="markdown_image_chunk_collection"
+                )
+                logger.info("Đã tạo Chroma vector store trong bộ nhớ (không liên tục)")
+                return vector_store
+                
+        except Exception as e:
+            logger.warning(f"Không thể sử dụng thư mục {db_path} cho vector store: {e}")
+            # Clean up any partial database files that might have been created
+            try:
+                if os.path.exists(db_path):
+                    shutil.rmtree(db_path)
+                    logger.info(f"Đã xóa thư mục db tạm thời: {db_path}")
+            except Exception as cleanup_e:
+                logger.warning(f"Không thể xóa thư mục {db_path}: {cleanup_e}")
+            
+            continue
+    
+    # If we get here, all directory attempts failed
+    logger.error("Không thể tạo vector store trên đĩa. Thử sử dụng bộ nhớ tạm...")
+    
+    # Last resort - try creating in-memory vector store
     try:
-        logger.info(f"Đang tạo Chroma vector store từ các dòng vào {CHROMA_DB_DIR}...")
-        # Use the list of line_documents directly
+        logger.info("Đang tạo vector store trong bộ nhớ (không lưu trữ liên tục)...")
         vector_store = Chroma.from_documents(
-            documents=documents, # Use the list of Document objects
-            embedding=embeddings,
-            collection_name="markdown_image_chunk_collection", # Changed collection name
-            persist_directory=CHROMA_DB_DIR # Use the defined persist directory
+            documents=documents,
+            embedding=embeddings
         )
-        logger.info("Đã tạo và lưu trữ Chroma vector store từ các dòng.")
+        logger.info("Đã tạo vector store trong bộ nhớ thành công")
         return vector_store
     except Exception as e:
-        logger.error(f"Lỗi khi tạo vector store từ các dòng: {e}")
-        st.error("Không thể tạo vector store từ các dòng markdown. Vui lòng kiểm tra cấu hình embeddings và lưu trữ.")
+        logger.critical(f"Không thể tạo vector store ngay cả trong bộ nhớ: {e}")
+        st.error("Không thể tạo vector store. Vui lòng kiểm tra cấu hình.")
         st.error(f"Lỗi cụ thể: {e}")
         return None
-
 
 def main():
     """Main function to run the Streamlit application."""
