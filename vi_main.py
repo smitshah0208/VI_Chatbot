@@ -391,7 +391,7 @@ def main():
         db_path = st.session_state.get('current_db_path', 'bộ nhớ')
         st.sidebar.info(f"Cơ sở dữ liệu: {db_path}")
     else:
-        st.sidebar.warning("Chưa có PDF nào được xử lý")
+        st.sidebar.warning("")
 
     if st.sidebar.button("🔄 Đặt lại Trò chuyện"):
         reset_chat()
